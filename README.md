@@ -230,9 +230,17 @@ video vs audio   : 28.0ms  PASS (under one frame)
 vercel deploy
 ```
 
-Then **create a Blob store** in the project's Storage tab and redeploy. That is
-the one manual step, and without it the app will tell you so on load rather than
-failing later.
+**Then attach a Blob store — the deploy is not finished without it.** Uploads
+and rendered video have nowhere to go otherwise, because Vercel's filesystem is
+read-only:
+
+1. Vercel dashboard → your project → **Storage** → **Create Database** → **Blob**
+2. Connect it to the project
+3. **Redeploy**, so `BLOB_READ_WRITE_TOKEN` reaches the functions
+
+Until that is done `/api/system` reports `"storageKind": "local"` and the UI
+shows a red banner saying exactly what is missing, rather than failing later with
+something cryptic.
 
 ### What had to change to make this work
 
@@ -373,4 +381,9 @@ starts.
   subtitles are misaligned with your voiceover, the cuts inherit that.
 - **`ffmpeg-static` downloads its binary in a postinstall script.** If a build
   environment disables install scripts, the binary will be missing and
-  `/api/system` will say so.
+  `/api/system` will list every path it tried under `ffmpegCandidates`.
+- **`ffmpeg-static` must stay out of the server bundle.** It finds its binary
+  with `path.join(__dirname, 'ffmpeg')`, and bundling rewrites `__dirname` to
+  the chunk directory — so the binary ships but is never found. It is listed in
+  `serverExternalPackages` for that reason; removing it breaks rendering in a
+  way that only appears once deployed.

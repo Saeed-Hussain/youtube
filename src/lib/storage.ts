@@ -156,9 +156,10 @@ class BlobStorage implements StorageAdapter {
   async putFile(key: string, localPath: string, contentType?: string): Promise<StoredObject> {
     const { put } = await this.blob();
     const stat = await fs.stat(localPath);
-    // Streamed rather than read into memory: a rendered video can be hundreds
-    // of megabytes and a function has a hard memory ceiling.
-    const result = await put(key, createReadStream(localPath) as unknown as ReadableStream, {
+    // A Node Readable is an accepted body type, so the file streams up rather
+    // than being read into memory: a rendered video can be hundreds of
+    // megabytes and a function has a hard memory ceiling.
+    const result = await put(key, createReadStream(localPath), {
       access: 'public',
       addRandomSuffix: false,
       allowOverwrite: true,
@@ -188,7 +189,18 @@ class BlobStorage implements StorageAdapter {
   }
 
   async putJson(key: string, value: unknown): Promise<void> {
-    await this.putBuffer(key, JSON.stringify(value), 'application/json');
+    const { put } = await this.blob();
+    // Manifests are overwritten constantly at a stable URL, and Blob puts a CDN
+    // in front with a month-long default TTL. Without a short max-age a render
+    // step can read back the previous state and either redo work or lose it, so
+    // this is the one place caching has to be suppressed rather than tuned.
+    await put(key, JSON.stringify(value), {
+      access: 'public',
+      addRandomSuffix: false,
+      allowOverwrite: true,
+      contentType: 'application/json',
+      cacheControlMaxAge: 0,
+    });
   }
 
   async fetchTo(key: string, localPath: string): Promise<void> {

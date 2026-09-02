@@ -75,7 +75,8 @@ export async function ffmpegPath(): Promise<string> {
   }
 
   throw new Error(
-    'Could not find a runnable ffmpeg. Install FFmpeg and put it on PATH, or set FFMPEG_PATH.',
+    'Could not find a runnable ffmpeg. On a server, install it and put it on PATH or set FFMPEG_PATH. ' +
+      'In a deployment this usually means the bundled ffmpeg-static binary was not included - check /api/system for the paths that were tried.',
   );
 }
 
@@ -84,30 +85,79 @@ export async function ffprobePath(): Promise<string> {
   return ffmpegPath();
 }
 
-async function bundledFfmpeg(): Promise<string | null> {
-  let source: string | null = null;
+/** Every place the bundled binary might plausibly be, in order of preference. */
+async function bundledCandidates(): Promise<string[]> {
+  const found: string[] = [];
+
+  // What the package itself reports. Correct as long as it was not inlined
+  // into a bundle, which would rewrite its __dirname.
   try {
     const mod = await import('ffmpeg-static');
-    source = (mod.default ?? (mod as unknown as string)) as string;
+    const reported = (mod.default ?? (mod as unknown as string)) as string | null;
+    if (reported) found.push(reported);
   } catch {
-    return null;
+    /* not installed */
   }
-  if (!source) return null;
 
-  if (await isRunnable(source)) return source;
+  // Direct paths, as a backstop for exactly the bundling case above. On Vercel
+  // the deployed function is rooted at /var/task.
+  const name = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+  for (const root of [process.cwd(), '/var/task']) {
+    found.push(path.join(root, 'node_modules', 'ffmpeg-static', name));
+  }
 
-  // Unpacked without the executable bit: stage a runnable copy in /tmp.
-  try {
-    const target = path.join(os.tmpdir(), 'clipforge-bin', 'ffmpeg');
-    if (!(await isRunnable(target))) {
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.copyFile(source, target);
-      await fs.chmod(target, 0o755);
+  return [...new Set(found)];
+}
+
+async function bundledFfmpeg(): Promise<string | null> {
+  const staged = path.join(os.tmpdir(), 'clipforge-bin', 'ffmpeg');
+  if (await isRunnable(staged)) return staged;
+
+  for (const source of await bundledCandidates()) {
+    if (!(await fileExists(source))) continue;
+    if (await isRunnable(source)) return source;
+
+    // Present but not executable: files unpacked into a serverless bundle lose
+    // the executable bit, so stage a runnable copy in /tmp.
+    try {
+      await fs.mkdir(path.dirname(staged), { recursive: true });
+      await fs.copyFile(source, staged);
+      await fs.chmod(staged, 0o755);
+      if (await isRunnable(staged)) return staged;
+    } catch {
+      /* try the next candidate */
     }
-    return (await isRunnable(target)) ? target : null;
-  } catch {
-    return null;
   }
+
+  return null;
+}
+
+async function fileExists(file: string): Promise<boolean> {
+  try {
+    await fs.access(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** What was tried, for the diagnostics in /api/system. */
+export async function ffmpegDiagnostics(): Promise<{ candidate: string; exists: boolean; runnable: boolean }[]> {
+  const out: { candidate: string; exists: boolean; runnable: boolean }[] = [];
+
+  const candidates = [
+    ...(process.env.FFMPEG_PATH ? [process.env.FFMPEG_PATH] : []),
+    'ffmpeg',
+    ...(await bundledCandidates()),
+    path.join(os.tmpdir(), 'clipforge-bin', 'ffmpeg'),
+  ];
+
+  for (const candidate of [...new Set(candidates)]) {
+    const exists = candidate === 'ffmpeg' ? true : await fileExists(candidate);
+    out.push({ candidate, exists, runnable: exists ? await isRunnable(candidate) : false });
+  }
+
+  return out;
 }
 
 async function isRunnable(bin: string): Promise<boolean> {

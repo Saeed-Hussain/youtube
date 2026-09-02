@@ -4,6 +4,19 @@ const nextConfig = {
   // through the body parser, so no body-size limit needs raising here.
   eslint: { ignoreDuringBuilds: true },
 
+  /*
+   * Keep ffmpeg-static out of the server bundle.
+   *
+   * The package locates its binary with `path.join(__dirname, 'ffmpeg')`. Next
+   * inlines dependencies into its own chunks by default, which rewrites
+   * `__dirname` to the chunk's directory - so the module ends up looking for
+   * the binary in `.next/server/chunks/`, where it will never be, and reports
+   * that FFmpeg is not installed even though the file shipped correctly.
+   * Marking it external leaves it as a real require from node_modules, so
+   * `__dirname` still points at the package.
+   */
+  serverExternalPackages: ['ffmpeg-static'],
+
 
   // Tracing walks node_modules writing thousands of small files under .next.
   // Rooting it at the project keeps that walk from climbing above the repo,

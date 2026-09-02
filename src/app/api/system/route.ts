@@ -1,5 +1,5 @@
 import os from 'node:os';
-import { detectBestEncoder, ffmpegPath, renderConcurrency, run } from '@/lib/ffmpeg';
+import { availableCores, detectBestEncoder, ffmpegDiagnostics, ffmpegPath, renderConcurrency, run } from '@/lib/ffmpeg';
 import { checkStorage } from '@/lib/jobs';
 import { ok } from '@/lib/http';
 
@@ -35,17 +35,22 @@ export async function GET() {
       ffmpeg: version.trim(),
       encoder,
       hardwareAccelerated: encoder !== 'x264',
-      cores: os.cpus()?.length ?? 0,
+      hostCores: os.cpus()?.length ?? 0,
+      cores: availableCores(),
       concurrency: renderConcurrency(),
     });
   } catch (err) {
+    // The binary is the usual failure, and "not found" alone is not actionable,
+    // so list exactly what was looked for and what was there.
     return ok({
       ready: false,
       storageWritable: storage.writable,
       storageError: storage.error,
       storageKind: storage.kind,
       error: err instanceof Error ? err.message : String(err),
-      cores: os.cpus()?.length ?? 0,
+      ffmpegCandidates: await ffmpegDiagnostics().catch(() => []),
+      hostCores: os.cpus()?.length ?? 0,
+      cores: availableCores(),
     });
   }
 }
