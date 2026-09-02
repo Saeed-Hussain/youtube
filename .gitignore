@@ -1,0 +1,14 @@
+node_modules/
+.next/
+out/
+
+# Job workspaces: uploads, intermediates and rendered video. Regenerated on demand.
+.data/
+
+# Scratch space and e2e fixtures/output.
+.scratch/
+tests/e2e/media/
+tests/e2e/out.mp4
+
+*.log
+next-env.d.ts

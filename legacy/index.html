@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ClipForge — AI Video Automation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,wght@0,300;0,400;0,500;1,300&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- 1. Supabase JS v2 -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+  <!--
+    NOTE: FFmpeg.wasm and face-api.js are loaded LAZILY by app.js when first needed.
+    For multi-threaded FFmpeg.wasm (much faster), the page must be served with these
+    HTTP response headers so SharedArrayBuffer is available:
+        Cross-Origin-Opener-Policy:   same-origin
+        Cross-Origin-Embedder-Policy: require-corp
+    Use the bundled `serve.py` for easy local testing — it sets them for you.
+    If those headers are missing the renderer automatically falls back to the
+    single-thread core (still much faster than the old MediaRecorder approach).
+  -->
+  <script src="app.js" defer></script>
+</head>
+<body>
+
+  <div class="noise"></div>
+
+  <!-- ── SIDEBAR ── -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-logo">
+      <span class="logo-icon">⬡</span>
+      <span class="logo-text">ClipForge</span>
+    </div>
+    <nav class="sidebar-nav">
+      <button class="nav-item active" data-page="dashboard"><span class="nav-icon">▦</span>Dashboard</button>
+      <button class="nav-item" data-page="characters"><span class="nav-icon">◉</span>Characters</button>
+      <button class="nav-item" data-page="upload"><span class="nav-icon">⊕</span>New Project</button>
+      <button class="nav-item" data-page="projects"><span class="nav-icon">▤</span>Projects</button>
+    </nav>
+    <div class="sidebar-footer">
+      <div class="api-status" id="apiStatus">
+        <span class="status-dot"></span>
+        <span class="status-text">Checking…</span>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ── MAIN ── -->
+  <main class="main" id="main">
+    <header class="topbar">
+      <div class="topbar-left">
+        <button class="menu-btn" id="menuBtn">☰</button>
+        <span class="topbar-title" id="topbarTitle">Dashboard</span>
+      </div>
+      <div class="topbar-right">
+        <span class="topbar-badge" id="processingBadge" style="display:none">
+          <span class="spin">◌</span> Processing…
+        </span>
+      </div>
+    </header>
+
+    <!-- ══ DASHBOARD ══ -->
+    <section class="page active" id="page-dashboard">
+      <div class="page-inner">
+        <div class="dash-hero">
+          <div class="dash-hero-text">
+            <p class="dash-eyebrow">Supabase · youtube · 100% Free · No API Keys</p>
+            <h1 class="dash-title">AI Video<br/>Automation</h1>
+            <p class="dash-sub">Upload clips, tag characters, add a script &amp; voiceover. AI assembles and renders your video — stored in Supabase.</p>
+            <button class="btn-primary" onclick="goTo('upload')">Start New Project ↗</button>
+          </div>
+          <div class="dash-hero-visual">
+            <div class="hero-card">
+              <div class="hc-row"><span class="hc-dot green"></span><span>FFmpeg.wasm render</span><span class="hc-tag">v6 · 10-100× faster</span></div>
+              <div class="hc-row"><span class="hc-dot green"></span><span>Exact voiceover sync</span><span class="hc-tag">✓</span></div>
+              <div class="hc-row"><span class="hc-dot green"></span><span>Supabase · youtube</span><span class="hc-tag">connected</span></div>
+              <div class="hc-divider"></div>
+              <div class="hc-total"><span>Total / video</span><strong>$0.00</strong></div>
+            </div>
+          </div>
+        </div>
+        <div class="stats-row">
+          <div class="stat-card"><span class="stat-num" id="statTotal">—</span><span class="stat-label">Total Projects</span></div>
+          <div class="stat-card"><span class="stat-num" id="statDone">—</span><span class="stat-label">Completed</span></div>
+          <div class="stat-card"><span class="stat-num" id="statChars">—</span><span class="stat-label">Characters</span></div>
+          <div class="stat-card"><span class="stat-num" id="statCost">$0.00</span><span class="stat-label">Total Cost</span></div>
+        </div>
+        <div class="recent-section">
+          <div class="section-header">
+            <span class="section-title">Recent Projects</span>
+            <button class="btn-ghost" onclick="goTo('projects')">View All →</button>
+          </div>
+          <div id="recentProjects">
+            <div class="empty-state"><span class="empty-icon">◎</span><p>Loading projects…</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ CHARACTERS ══ -->
+    <section class="page" id="page-characters">
+      <div class="page-inner">
+        <div class="page-header">
+          <div>
+            <h2 class="page-title">Characters</h2>
+            <p class="page-sub">Add characters to tag and organize your clips</p>
+          </div>
+          <button class="btn-primary" id="addCharBtn">+ Add Character</button>
+        </div>
+        <div class="card collapse" id="addCharForm">
+          <div class="card-title">Register New Character</div>
+          <div class="form-row">
+            <div class="form-group">
+              <label>Character Name</label>
+              <input type="text" id="charName" placeholder="e.g. Ahmed, Sara, Host…" class="input" />
+            </div>
+            <div class="form-group">
+              <label>Role / Nicknames</label>
+              <input type="text" id="charRole" placeholder="e.g. rapper | nickname: Drizzy, Drake, Aubrey" class="input" />
+              <div style="font-size:0.7rem;color:var(--text3);margin-top:0.25rem">Add <code>nickname: X, Y</code> so ClipForge recognises aliases and short-name references in the script.</div>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>Reference Photos</label>
+            <div class="upload-zone" id="charPhotoZone">
+              <input type="file" id="charPhotos" accept="image/*" multiple hidden />
+              <span class="uz-icon">⊕</span>
+              <span>Drop face photos here or click to browse</span>
+              <span class="uz-hint">.jpg .png .webp — multiple photos improve recognition</span>
+            </div>
+            <div id="charPhotoPreviews" class="photo-previews"></div>
+          </div>
+          <div class="form-actions">
+            <button class="btn-ghost" id="cancelCharBtn">Cancel</button>
+            <button class="btn-primary" id="saveCharBtn"><span id="saveCharText">Save Character</span></button>
+          </div>
+        </div>
+        <div class="characters-grid" id="charactersGrid">
+          <div class="empty-state"><span class="empty-icon">◉</span><p>No characters yet.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ══ NEW PROJECT ══ -->
+    <section class="page" id="page-upload">
+      <div class="page-inner">
+        <div class="page-header">
+          <div>
+            <h2 class="page-title">New Project</h2>
+            <p class="page-sub">Upload assets, tag characters per clip — pure JS handles the rest</p>
+          </div>
+        </div>
+
+        <div class="steps-bar">
+          <div class="step active" data-step="1"><span class="step-num">1</span><span class="step-label">Assets</span></div>
+          <div class="step-line"></div>
+          <div class="step" data-step="2"><span class="step-num">2</span><span class="step-label">Analyse</span></div>
+          <div class="step-line"></div>
+          <div class="step" data-step="3"><span class="step-num">3</span><span class="step-label">Preview</span></div>
+          <div class="step-line"></div>
+          <div class="step" data-step="4"><span class="step-num">4</span><span class="step-label">Export</span></div>
+        </div>
+
+        <!-- STEP 1 -->
+        <div class="step-content active" id="step1">
+          <div class="form-group" style="margin-bottom:1.5rem">
+            <label>Project Title</label>
+            <input type="text" id="projectTitle" placeholder="e.g. Episode 3 — React Tutorial" class="input input-lg" />
+          </div>
+
+          <div class="upload-grid">
+
+            <!-- VIDEO CLIPS — with character tagger -->
+            <div class="upload-card upload-card-wide">
+              <div class="uc-header">
+                <span class="uc-icon">▶</span>
+                <div>
+                  <div class="uc-title">Video Clips</div>
+                  <div class="uc-sub">Upload clips &amp; type character names — they're registered instantly</div>
+                </div>
+              </div>
+              <div class="upload-zone" id="videoZone">
+                <input type="file" id="videoFiles" accept="video/*" multiple hidden />
+                <span class="uz-icon">⊕</span>
+                <span>Drop clips here or click to browse</span>
+                <span class="uz-hint">.mp4 .mov .webm .mkv — you can add clips in multiple batches</span>
+              </div>
+              <div style="display:flex;align-items:center;justify-content:space-between;margin:0.4rem 0 0.2rem;">
+                <span id="clipCountBadge" style="font-size:0.82rem;font-weight:600;color:var(--blue);min-height:1.2em;"></span>
+                <button id="clearClipsBtn" onclick="clearAllClips()" style="font-size:0.72rem;padding:0.2rem 0.6rem;background:transparent;border:1px solid var(--border);border-radius:4px;color:var(--text3);cursor:pointer;display:none;">✕ Clear all</button>
+              </div>
+
+              <!-- ── CLIP ROWS (rendered by JS after file selection) ── -->
+              <div id="clipRows" class="clip-rows"></div>
+            </div>
+
+            <!-- RIGHT COLUMN: Script + Audio stacked -->
+            <div class="upload-col">
+
+              <!-- Script -->
+              <div class="upload-card">
+                <div class="uc-header">
+                  <span class="uc-icon">≡</span>
+                  <div><div class="uc-title">Script</div><div class="uc-sub">Storyboard or script file</div></div>
+                </div>
+                <div class="upload-zone" id="scriptZone">
+                  <input type="file" id="scriptFile" accept=".txt,.md,.docx,.pdf" hidden />
+                  <span class="uz-icon">⊕</span>
+                  <span>Drop script here or click</span>
+                  <span class="uz-hint">.txt .md .pdf .docx</span>
+                </div>
+                <div class="file-list" id="scriptFileList"></div>
+                <div class="form-group" style="margin-top:0.75rem">
+                  <label style="font-size:0.72rem">Or paste script directly</label>
+                  <textarea id="scriptText" class="input textarea" placeholder="Paste your script here…" rows="4"></textarea>
+                </div>
+              </div>
+
+              <!-- Voiceover -->
+              <div class="upload-card">
+                <div class="uc-header">
+                  <span class="uc-icon">◎</span>
+                  <div><div class="uc-title">Voiceover</div><div class="uc-sub">Pre-recorded narration · paste transcript below for better matching</div></div>
+                </div>
+                <div class="upload-zone" id="audioZone">
+                  <input type="file" id="audioFile" accept="audio/*,.txt,.srt,.vtt" hidden />
+                  <span class="uz-icon">⊕</span>
+                  <span>Drop audio here or click</span>
+                  <span class="uz-hint">.mp3 .wav .m4a .ogg — or .txt .srt .vtt</span>
+                </div>
+                <div class="file-list" id="audioFileList"></div>
+                <div class="form-group" style="margin-top:0.75rem">
+                  <label style="font-size:0.72rem">Paste transcript here <span style="color:var(--text3)">(optional — improves script matching)</span></label>
+                  <textarea id="transcriptText" class="input textarea" placeholder="Paste the spoken words of your voiceover here…" rows="4"></textarea>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <div class="step-actions">
+            <button class="btn-primary btn-lg" id="startAnalysisBtn">Analyse &amp; Process ↗</button>
+          </div>
+        </div>
+
+        <!-- STEP 2 -->
+        <div class="step-content" id="step2">
+          <div class="analysis-layout">
+            <div class="analysis-log">
+              <div class="log-header">AI Pipeline Log</div>
+              <div class="log-entries" id="logEntries"></div>
+            </div>
+            <div class="analysis-results">
+              <div class="result-panel">
+                <div class="rp-title">◉ Clip Tags</div>
+                <div class="rp-body" id="faceResults">Waiting…</div>
+              </div>
+              <div class="result-panel">
+                <div class="rp-title">◎ Transcription</div>
+                <div class="rp-body" id="transcriptResults">Waiting…</div>
+              </div>
+              <div class="result-panel">
+                <div class="rp-title">≡ Script Matching</div>
+                <div class="rp-body" id="matchResults">Waiting…</div>
+              </div>
+            </div>
+          </div>
+          <div class="progress-section">
+            <div class="progress-label" id="progressLabel">Initialising…</div>
+            <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+            <div class="progress-pct" id="progressPct">0%</div>
+          </div>
+          <div class="step-actions" id="confirmRenderActions" style="display:none">
+            <button class="btn-ghost" onclick="goToStep(1)">← Back</button>
+            <button class="btn-primary btn-lg" id="confirmRenderBtn">Confirm Clips &amp; Render ↗</button>
+          </div>
+        </div>
+
+        <!-- STEP 3 -->
+        <div class="step-content" id="step3">
+          <div class="preview-layout">
+            <div class="preview-main">
+              <div class="video-preview-box">
+                <video id="previewVideo" controls style="width:100%;border-radius:8px;display:none"></video>
+                <div class="preview-placeholder" id="previewPlaceholder">
+                  <span>▶</span><p>Rendered preview will appear here</p>
+                </div>
+              </div>
+              <div class="caption-preview" id="captionPreview"></div>
+            </div>
+            <div class="preview-sidebar">
+              <div class="ps-section">
+                <div class="ps-title">Detected Characters</div>
+                <div id="detectedCharsList"></div>
+              </div>
+              <div class="ps-section">
+                <div class="ps-title">Transcript Preview</div>
+                <div class="transcript-scroll" id="transcriptScroll"></div>
+              </div>
+              <div class="ps-section">
+                <div class="ps-title">Script Matches</div>
+                <div id="scriptMatchesList"></div>
+              </div>
+            </div>
+          </div>
+          <div class="step-actions">
+            <button class="btn-ghost" onclick="goToStep(1)">← Back</button>
+            <button class="btn-primary btn-lg" id="renderBtn">Render Final Video ↗</button>
+          </div>
+        </div>
+
+        <!-- STEP 4 -->
+        <div class="step-content" id="step4">
+          <div class="export-layout">
+            <div class="export-main">
+              <div class="export-success">
+                <div class="success-icon">✓</div>
+                <h3>Video Ready</h3>
+                <p>Processed with pure JS and saved to Supabase <strong>youtube</strong> project.</p>
+              </div>
+              <div class="export-info" id="exportInfo"></div>
+
+              <!-- QUALITY SETTINGS -->
+              <div class="quality-panel">
+                <div class="qp-title">⚙ Export Quality</div>
+                <div class="qp-grid">
+                  <div class="qp-field">
+                    <label>Resolution</label>
+                    <select id="exportResolution" class="qp-select">
+                      <option value="3840x2160">3840 × 2160 — 4K</option>
+                      <option value="1920x1080">1920 × 1080 — Full HD</option>
+                      <option value="1280x720" selected>1280 × 720 — HD (default)</option>
+                      <option value="854x480">854 × 480 — SD</option>
+                    </select>
+                  </div>
+                  <div class="qp-field">
+                    <label>Frame Rate</label>
+                    <select id="exportFps" class="qp-select">
+                      <option value="24">24 fps — Cinematic</option>
+                      <option value="30" selected>30 fps — Standard</option>
+                      <option value="60">60 fps — Smooth</option>
+                    </select>
+                  </div>
+                  <div class="qp-field">
+                    <label>Video Bitrate</label>
+                    <select id="exportBitrate" class="qp-select">
+                      <option value="1500000">1.5 Mbps — Web / Draft</option>
+                      <option value="3000000" selected>3 Mbps — Standard</option>
+                      <option value="6000000">6 Mbps — High Quality</option>
+                      <option value="12000000">12 Mbps — Ultra (Filmora)</option>
+                    </select>
+                  </div>
+                  <div class="qp-field">
+                    <label>Codec</label>
+                    <select id="exportFormat" class="qp-select">
+                      <option value="mp4" selected>MP4 + H.264 (mobile-friendly)</option>
+                      <option value="vp9">VP9 + Opus (best quality)</option>
+                      <option value="vp8">VP8 + Opus (compat)</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="qp-note">💡 For Filmora: use <strong>12 Mbps</strong>, then click <em>Export for Filmora (.wfpbundle)</em> below.</div>
+              </div>
+
+              <!-- EXPORT BUTTONS -->
+              <div class="export-actions-grid">
+                <button class="btn-primary btn-lg" id="downloadBtn">⬇ Download Merged Video</button>
+                <button class="btn-export-zip" id="downloadClipsBtn">📦 Export All Clips (ZIP)</button>
+                <button class="btn-export-filmora" id="filmoraBtn">🎬 Export for Filmora (.wfpbundle)</button>
+                <button class="btn-ghost" id="reRenderBtn">↺ Re-Render with Settings</button>
+              </div>
+
+              <!-- PER-CLIP DOWNLOAD TABLE -->
+              <div class="clip-export-section">
+                <div class="ces-title">Per-Clip Downloads</div>
+                <div id="clipExportList" class="clip-export-list"></div>
+              </div>
+            </div>
+
+            <div class="export-sidebar">
+              <div class="ps-section">
+                <div class="ps-title">Pipeline Summary</div>
+                <div id="pipelineSummary"></div>
+              </div>
+              <div class="ps-section">
+                <div class="ps-title">Filmora Import Guide</div>
+                <div class="filmora-guide">
+                  <div class="fg-step"><span class="fg-num">1</span><span>Click <strong>Export for Filmora (.wfpbundle)</strong></span></div>
+                  <div class="fg-step"><span class="fg-num">2</span><span>Two files download: <code>.wfpbundle</code> and <code>.wfp</code></span></div>
+                  <div class="fg-step"><span class="fg-num">3</span><span>Open Filmora → <strong>File → Open Project (.wfp)</strong></span></div>
+                  <div class="fg-step"><span class="fg-num">4</span><span>Or drag the <code>.wfpbundle</code> directly onto Filmora's media panel</span></div>
+                  <div class="fg-note">ℹ Compatible with Filmora 12+. Native .wfp / .wfpbundle format with SRT-timed clip positions.</div>
+                </div>
+              </div>
+              <div class="ps-section">
+                <button class="btn-ghost btn-full" id="saveProjectBtn">View in Projects →</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ══ PROJECTS ══ -->
+    <section class="page" id="page-projects">
+      <div class="page-inner">
+        <div class="page-header">
+          <div>
+            <h2 class="page-title">All Projects</h2>
+            <p class="page-sub">Your processed videos stored in Supabase · youtube</p>
+          </div>
+          <button class="btn-primary" onclick="goTo('upload')">+ New Project</button>
+        </div>
+        <div id="projectsFullList">
+          <div class="empty-state"><span class="empty-icon">▤</span><p>No projects yet.</p></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- TOAST -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- PROJECT DETAIL MODAL -->
+  <div class="modal-overlay" id="projectDetailModal">
+    <div class="modal modal-wide">
+      <div class="modal-title" id="detailModalTitle">Project Details</div>
+      <div id="projectDetailBody"></div>
+      <div class="modal-actions" style="margin-top:1.25rem">
+        <button class="btn-ghost" onclick="closeProjectDetail()">Close</button>
+        <a id="detailDownloadLink" href="#" target="_blank" class="btn-primary" style="text-decoration:none;display:none">⬇ Download Video</a>
+      </div>
+    </div>
+  </div>
+
+<script defer src="https://static.cloudflareinsights.com/beacon.min.js/v833ccba57c9e4d2798f2e76cebdd09a11778172276447" integrity="sha512-57MDmcccJXYtNnH+ZiBwzC4jb2rvgVCEokYN+L/nLlmO8rfYT/gIpW2A569iJ/3b+0UEasghjuZH/ma3wIs/EQ==" data-cf-beacon='{"version":"2024.11.0","token":"4edd5f8ec12a48cfa682ab8261b80a79","server_timing":{"name":{"cfCacheStatus":true,"cfEdge":true,"cfExtPri":true,"cfL4":true,"cfOrigin":true,"cfSpeedBrain":true},"location_startswith":null}}' crossorigin="anonymous"></script>
+</body>
+</html>

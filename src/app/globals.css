@@ -1,0 +1,350 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * A single light palette, tuned like a print layout rather than a dashboard:
+ * white panels on a faintly cool paper ground, hairline borders instead of
+ * heavy dividers, and exactly one saturated accent so a character's colour on
+ * the timeline never competes with the interface.
+ *
+ * Text colours are picked for contrast against #ffffff panels, not against the
+ * page ground, since every piece of type sits on a panel.
+ */
+:root {
+  color-scheme: light;
+
+  --bg: #f4f6f9;
+  --surface-1: #ffffff;
+  --surface-2: #f7f9fc;
+  --surface-3: #eef1f6;
+  --line: #dde2ea;
+  --line-soft: #e9edf3;
+
+  --text: #14171e;
+  --text-dim: #4e5665;
+  --text-faint: #858d9c;
+
+  --accent: #2f5fe0;
+  --accent-soft: #4a76ea;
+  --good: #0e9b62;
+  --warn: #b0740b;
+  --bad: #d5303c;
+
+  --radius: 10px;
+
+  /*
+   * Elevation scale.
+   *
+   * Every level is two shadows, because one never looks right: a tight, darker
+   * contact shadow that anchors the element to the surface below it, plus a
+   * wide, faint ambient shadow that gives it mass. Both are offset straight
+   * down - a single overhead light source, consistent everywhere - and tinted
+   * with the text colour rather than pure black, so shadows read as shade on
+   * paper instead of as grey haze.
+   */
+  --shadow-1: 0 1px 1px rgba(20, 23, 30, 0.04), 0 2px 5px -1px rgba(20, 23, 30, 0.05);
+  --shadow-2: 0 1px 2px rgba(20, 23, 30, 0.06), 0 4px 10px -2px rgba(20, 23, 30, 0.07);
+  --shadow-3: 0 2px 4px rgba(20, 23, 30, 0.06), 0 10px 24px -6px rgba(20, 23, 30, 0.10);
+  --shadow-4: 0 4px 8px rgba(20, 23, 30, 0.07), 0 20px 40px -12px rgba(20, 23, 30, 0.14);
+
+  /* Pressed: the element sinks below the surface instead of floating over it. */
+  --shadow-inset: inset 0 1px 3px rgba(20, 23, 30, 0.10);
+
+  /* A hairline of light along a raised element's top edge - the highlight a
+     real bevel would catch from the same overhead source. */
+  --bevel: inset 0 1px 0 rgba(255, 255, 255, 0.65);
+  /* The same highlight, tuned for a saturated background. */
+  --bevel-accent: inset 0 1px 0 rgba(255, 255, 255, 0.28);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'ss01';
+  /* A very slow wash at the top keeps a long page from reading as flat card soup. */
+  background-image: linear-gradient(180deg, #ffffff 0%, var(--bg) 340px);
+  background-repeat: no-repeat;
+}
+
+@layer components {
+  .surface {
+    background: var(--surface-1);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+  }
+
+  /*
+   * A panel that sits above the page. The border is kept alongside the shadow
+   * rather than replaced by it: shadow alone goes muddy against the off-white
+   * ground, and the hairline is what keeps the edge crisp at any zoom level.
+   */
+  .surface-lit {
+    position: relative;
+    overflow: hidden;
+    box-shadow: var(--shadow-2);
+    transition: box-shadow 180ms ease;
+  }
+
+  /* The result panel and the inspector are the focus when present, so they sit
+     one level higher than the panels around them. */
+  .surface-raised {
+    box-shadow: var(--shadow-3);
+  }
+
+  .panel-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 13px 16px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .panel-title {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+  }
+
+  /*
+   * Buttons are physical: they carry a bevel highlight and a drop shadow at
+   * rest, lift very slightly on hover, and on press translate down while the
+   * shadow collapses to an inset. Moving the element and its shadow together is
+   * what sells the press - a colour change alone reads as flat.
+   */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    border-radius: 8px;
+    padding: 9px 16px;
+    font-size: 13px;
+    font-weight: 550;
+    line-height: 1;
+    transition:
+      background-color 120ms ease,
+      border-color 120ms ease,
+      color 120ms ease,
+      box-shadow 120ms ease,
+      transform 90ms cubic-bezier(0.2, 0, 0.2, 1);
+  }
+  .btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    box-shadow: none;
+  }
+
+  .btn-primary {
+    background: linear-gradient(180deg, var(--accent-soft) 0%, var(--accent) 100%);
+    color: #ffffff;
+    box-shadow:
+      var(--bevel-accent),
+      0 1px 2px rgba(20, 23, 30, 0.14),
+      0 3px 8px -2px rgba(47, 95, 224, 0.40);
+  }
+  .btn-primary:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow:
+      var(--bevel-accent),
+      0 2px 4px rgba(20, 23, 30, 0.14),
+      0 6px 14px -3px rgba(47, 95, 224, 0.45);
+  }
+  .btn-primary:active:not(:disabled) {
+    transform: translateY(1px);
+    background: var(--accent);
+    box-shadow: inset 0 2px 4px rgba(10, 25, 80, 0.30);
+  }
+
+  .btn-ghost {
+    background: linear-gradient(180deg, #ffffff 0%, var(--surface-2) 100%);
+    border: 1px solid var(--line);
+    color: var(--text-dim);
+    box-shadow: var(--bevel), var(--shadow-1);
+  }
+  .btn-ghost:hover:not(:disabled) {
+    color: var(--text);
+    border-color: #c7cedb;
+    transform: translateY(-1px);
+    box-shadow: var(--bevel), var(--shadow-2);
+  }
+  .btn-ghost:active:not(:disabled) {
+    transform: translateY(1px);
+    box-shadow: var(--shadow-inset);
+  }
+
+  /* Inputs are recessed - the inverse of a button - so the two never read as
+     the same kind of thing. */
+  .field {
+    width: 100%;
+    background: #ffffff;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px 11px;
+    font-size: 13px;
+    color: var(--text);
+    box-shadow: inset 0 1px 2px rgba(20, 23, 30, 0.05);
+    transition: border-color 120ms ease, box-shadow 120ms ease;
+  }
+  .field::placeholder {
+    color: var(--text-faint);
+  }
+  .field:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: inset 0 1px 2px rgba(20, 23, 30, 0.04), 0 0 0 3px rgba(47, 95, 224, 0.14);
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: linear-gradient(180deg, #ffffff 0%, var(--surface-2) 100%);
+    box-shadow: var(--bevel), 0 1px 1px rgba(20, 23, 30, 0.04);
+    padding: 3px 9px;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+
+  .label {
+    display: block;
+    font-size: 11px;
+    font-weight: 550;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+
+  .mono {
+    font-family: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* A timeline lane is a groove cut into the panel; the shot blocks sit in it. */
+  .lane-track {
+    background: var(--surface-3);
+    border-radius: 5px;
+    box-shadow: inset 0 1px 2px rgba(20, 23, 30, 0.11);
+  }
+
+  /*
+   * Shot blocks get their volume from a top-edge highlight and a contact
+   * shadow rather than from a border, which at two pixels wide would consume
+   * the entire block.
+   */
+  .lane-block {
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.30),
+      0 1px 2px rgba(20, 23, 30, 0.22);
+    background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(0, 0, 0, 0.06));
+  }
+
+  /* Progress bars are recessed, so the fill reads as liquid in a channel. */
+  .meter {
+    background: var(--surface-3);
+    box-shadow: inset 0 1px 2px rgba(20, 23, 30, 0.13);
+    overflow: hidden;
+  }
+  .meter > * {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  }
+}
+
+/* Range inputs: the browser default is the single ugliest control on the page. */
+input[type='range'] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 18px;
+  background: transparent;
+  cursor: pointer;
+}
+input[type='range']::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  box-shadow: inset 0 1px 2px rgba(20, 23, 30, 0.14);
+}
+input[type='range']::-moz-range-track {
+  height: 4px;
+  border-radius: 3px;
+  background: var(--surface-3);
+  box-shadow: inset 0 1px 2px rgba(20, 23, 30, 0.14);
+}
+input[type='range']::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
+  margin-top: -5.5px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, var(--accent-soft), var(--accent));
+  border: 2px solid #ffffff;
+  box-shadow: 0 1px 2px rgba(20, 23, 30, 0.22), 0 2px 6px -1px rgba(47, 95, 224, 0.45);
+  transition: box-shadow 120ms ease, transform 90ms ease;
+}
+input[type='range']:hover::-webkit-slider-thumb {
+  transform: scale(1.08);
+}
+input[type='range']:active::-webkit-slider-thumb {
+  transform: scale(0.96);
+  box-shadow: 0 1px 1px rgba(20, 23, 30, 0.25);
+}
+input[type='range']::-moz-range-thumb {
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid #ffffff;
+  box-shadow: 0 1px 2px rgba(20, 23, 30, 0.22), 0 2px 6px -1px rgba(47, 95, 224, 0.45);
+}
+input[type='range']:disabled {
+  opacity: 0.45;
+}
+
+input[type='checkbox'] {
+  accent-color: var(--accent);
+  width: 15px;
+  height: 15px;
+}
+
+select.field {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--text-faint) 50%),
+    linear-gradient(135deg, var(--text-faint) 50%, transparent 50%);
+  background-position: right 13px center, right 8px center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 28px;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #c5ccd8 transparent;
+}
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #c5ccd8;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #aeb7c6;
+  background-clip: content-box;
+}
