@@ -271,9 +271,25 @@ at the end.
 
 These are honest constraints of the platform, not bugs:
 
-- **Hobby caps functions at 60s.** More steps, same result, but a long video
-  means a lot of round trips. On Pro, raise `maxDuration` in `vercel.json` to
-  300 and `CLIPFORGE_STEP_BUDGET_MS` to ~280000 for far fewer, longer steps.
+- **Hobby caps functions at 60s and 2048MB.** Both are set in `vercel.json`;
+  asking for more fails the deploy. On Vercel, vCPU is allocated in proportion
+  to memory (roughly one per 1769MB), so a Hobby function has about **one core**
+  and encodes one shot at a time. A long video therefore means a lot of short
+  steps.
+
+  On Pro, raise all three together for far fewer, longer steps:
+
+  ```jsonc
+  // vercel.json
+  { "maxDuration": 300, "memory": 3009 }   // 3009MB ~= 2 vCPU
+  ```
+  ```bash
+  CLIPFORGE_STEP_BUDGET_MS=280000
+  ```
+
+  Concurrency is derived from the function's real memory allocation rather than
+  `os.cpus()`, which reports the shared host and would have the renderer spawn
+  eight encoders on a single core. `CLIPFORGE_CORES` overrides the calculation.
 - **The browser tab must stay open** during a render, because the client drives
   the loop. Closing it pauses the render; reopening the job resumes it, since
   all progress is in the manifest.

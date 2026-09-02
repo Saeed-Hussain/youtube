@@ -565,14 +565,44 @@ export async function prepareAudio(source: string, dest: string, profile: Render
   return exactDuration(dest);
 }
 
-/** Sensible parallelism: leave a core for the OS and the Next.js process. */
+/**
+ * How many CPUs this process may actually use.
+ *
+ * `os.cpus()` reports the *host* machine, which on a serverless platform is a
+ * large shared box the function gets a small slice of. Vercel allocates vCPU in
+ * proportion to memory - roughly one per 1769MB - so a 2048MB function has
+ * about one core however many `os.cpus()` claims. Trusting that number there
+ * would spawn eight encoders on one core and exhaust the memory limit.
+ */
+export function availableCores(): number {
+  const override = Number(process.env.CLIPFORGE_CORES);
+  if (Number.isFinite(override) && override >= 1) return Math.floor(override);
+
+  if (isServerless()) {
+    // Vercel exposes the Lambda memory size; vCPU tracks it.
+    const memoryMb = Number(process.env.AWS_LAMBDA_FUNCTION_MEMORY_SIZE);
+    if (Number.isFinite(memoryMb) && memoryMb > 0) {
+      return Math.max(1, Math.round(memoryMb / 1769));
+    }
+    return 1;
+  }
+
+  return os.cpus()?.length ?? 4;
+}
+
+/** Sensible parallelism: leave headroom for the OS and the Node process. */
 export function renderConcurrency(): number {
-  const cores = os.cpus()?.length ?? 4;
+  const cores = availableCores();
+
+  // Each concurrent encoder holds its own frame buffers. At 1080p that is
+  // roughly 150-250MB of working set, so on a 2048MB function two is the
+  // realistic ceiling regardless of what the core count suggests.
+  if (isServerless()) return Math.max(1, Math.min(2, cores));
+
   return Math.max(1, Math.min(8, cores - 1));
 }
 
 /** Threads per encoder process, so parallel workers do not oversubscribe. */
 export function encoderThreads(): number {
-  const cores = os.cpus()?.length ?? 4;
-  return Math.max(1, Math.floor(cores / renderConcurrency()));
+  return Math.max(1, Math.floor(availableCores() / renderConcurrency()));
 }

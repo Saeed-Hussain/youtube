@@ -1,9 +1,10 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
-    "src/app/api/jobs/[id]/render/step/route.ts": { "maxDuration": 60, "memory": 3009 },
-    "src/app/api/jobs/[id]/render/route.ts": { "maxDuration": 60, "memory": 3009 },
-    "src/app/api/jobs/[id]/register/route.ts": { "maxDuration": 60, "memory": 3009 },
-    "src/app/api/jobs/[id]/analyse/route.ts": { "maxDuration": 60, "memory": 2048 }
+    "src/app/api/jobs/[id]/render/step/route.ts": { "maxDuration": 60, "memory": 2048 },
+    "src/app/api/jobs/[id]/render/route.ts": { "maxDuration": 60, "memory": 2048 },
+    "src/app/api/jobs/[id]/register/route.ts": { "maxDuration": 60, "memory": 2048 },
+    "src/app/api/system/route.ts": { "maxDuration": 30, "memory": 2048 },
+    "src/app/api/jobs/[id]/analyse/route.ts": { "maxDuration": 60, "memory": 1024 }
   }
 }

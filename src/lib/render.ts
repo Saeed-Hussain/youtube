@@ -15,7 +15,7 @@ import {
   type SegmentJob,
 } from './ffmpeg.ts';
 import { addLog, keys, writeJob, writeProgress, type Job } from './jobs.ts';
-import { clearScratch, scratchDir, storage } from './storage.ts';
+import { clearScratch, isServerless, scratchDir, storage } from './storage.ts';
 
 /**
  * Chunked, resumable rendering.
@@ -40,13 +40,23 @@ import { clearScratch, scratchDir, storage } from './storage.ts';
  */
 
 /** How long one step may work before returning, leaving headroom for upload. */
-const STEP_BUDGET_MS = Number(process.env.CLIPFORGE_STEP_BUDGET_MS ?? 40_000);
+const STEP_BUDGET_MS = Number(process.env.CLIPFORGE_STEP_BUDGET_MS ?? (isServerless() ? 38_000 : 40_000));
 
-/** Ceiling on source clips pulled into /tmp within a single step. */
-const SCRATCH_BUDGET_BYTES = Number(process.env.CLIPFORGE_SCRATCH_BUDGET ?? 220 * 1024 * 1024);
+/**
+ * Ceiling on source clips pulled into `/tmp` within a single step.
+ *
+ * A serverless function gets 512MB of ephemeral storage, and roughly 80MB of
+ * that is already gone on the staged FFmpeg binary. What remains has to cover
+ * the downloaded clips, the segments being written, and - during assembly - a
+ * group of finished segments plus the part file built from them. 150MB of
+ * source footage leaves comfortable room for all three.
+ */
+const SCRATCH_BUDGET_BYTES = Number(
+  process.env.CLIPFORGE_SCRATCH_BUDGET ?? (isServerless() ? 150 : 220) * 1024 * 1024,
+);
 
-/** Segments folded into one part file. */
-const PART_SIZE = 40;
+/** Segments folded into one part file - fewer at a time where /tmp is small. */
+const PART_SIZE = isServerless() ? 25 : 40;
 
 export interface StepResult {
   stage: Job['progress']['stage'];
