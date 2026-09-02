@@ -1,29 +1,30 @@
-import fs from 'node:fs/promises';
-import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Entity, Mention } from './entities.ts';
-import type { ClipAsset, Shot } from './plan.ts';
+import type { Shot } from './plan.ts';
 import type { RenderProfile } from './ffmpeg.ts';
+import { storage } from './storage.ts';
 
 /**
- * Filesystem-backed job storage - deliberately no database.
+ * Job storage.
  *
- * Every job owns a directory holding its uploads, its intermediates and its
- * `job.json` manifest. That makes the whole system inspectable with a file
- * browser, trivially portable, and disposable: deleting the directory deletes
- * the job. It also removes the Supabase round-trip that the previous version
- * made on every state change.
+ * Every job is a small JSON manifest plus a set of media objects, all held by
+ * the storage adapter - the local filesystem in development, Vercel Blob in
+ * production. Nothing here touches disk directly, because on a serverless host
+ * there is no disk worth touching: the only writable path is `/tmp`, and it is
+ * neither shared between instances nor guaranteed to survive to the next
+ * request.
+ *
+ * There is still deliberately no database. A manifest is a file, and job state
+ * is small enough that reading and rewriting it whole is cheaper than any
+ * schema would be.
  */
-
-export const DATA_ROOT = process.env.CLIPFORGE_DATA ?? path.join(process.cwd(), '.data');
-const JOBS_ROOT = path.join(DATA_ROOT, 'jobs');
 
 export type JobStage =
   | 'created'
-  | 'uploading'
   | 'analysing'
   | 'ready'
   | 'rendering'
+  | 'assembling'
   | 'done'
   | 'failed';
 
@@ -38,13 +39,56 @@ export interface JobProgress {
   /** 0-100. */
   percent: number;
   label: string;
-  /** Populated during rendering. */
-  segmentsDone?: number;
-  segmentsTotal?: number;
-  /** Milliseconds since the render started. */
+  shotsDone?: number;
+  shotsTotal?: number;
   elapsedMs?: number;
-  /** Best-effort projection of remaining time, in ms. */
   etaMs?: number;
+}
+
+export interface ProgressSnapshot extends JobProgress {
+  updatedAt: number;
+  error: string | null;
+  /** True while there is more work for the client to drive. */
+  more: boolean;
+}
+
+export interface StoredClip {
+  id: string;
+  filename: string;
+  /** Storage key, not a filesystem path. */
+  key: string;
+  durationMs: number;
+  width: number;
+  height: number;
+  fps: number;
+  hasAudio: boolean;
+  tags: string[];
+  entityIds: string[];
+}
+
+/**
+ * Progress through a chunked render.
+ *
+ * A serverless function cannot run for the length of a video render, so the
+ * work is split into resumable steps and the client drives the loop. All the
+ * state needed to pick up where the last invocation stopped lives here, in the
+ * manifest, because the process that ran the previous step no longer exists.
+ */
+export interface RenderState {
+  startedAt: number;
+  encoder: string;
+  /** Exact output frame count per shot - the anti-drift anchor. */
+  frames: number[];
+  audioKey: string | null;
+  audioDurationMs: number;
+  /** Every shot below this index has been encoded and uploaded. */
+  nextShot: number;
+  /** Every shot below this index has been folded into a part file. */
+  assembledUpTo: number;
+  /** Keys of the intermediate part files, in order. */
+  parts: string[];
+  /** Wall-clock spent encoding, accumulated across steps. */
+  workMs: number;
 }
 
 export interface Job {
@@ -53,81 +97,67 @@ export interface Job {
   updatedAt: number;
   progress: JobProgress;
 
-  subtitles: {
-    filename: string;
-    cueCount: number;
-    wordCount: number;
-    durationMs: number;
-    warnings: string[];
-  } | null;
+  subtitles: { filename: string; cueCount: number; wordCount: number; durationMs: number } | null;
+  voiceover: { filename: string; key: string; durationMs: number } | null;
 
-  voiceover: {
-    filename: string;
-    durationMs: number;
-  } | null;
-
-  clips: ClipAsset[];
+  clips: StoredClip[];
   entities: Entity[];
   mentions: Mention[];
   shots: Shot[];
 
-  /** Character names typed in by the user, seeded before auto-discovery. */
   declaredNames: string[];
   profile: RenderProfile;
+  render: RenderState | null;
 
   notes: string[];
   warnings: string[];
   logs: LogEntry[];
 
-  output: {
-    filename: string;
-    sizeBytes: number;
-    durationMs: number;
-    renderMs: number;
-  } | null;
-
+  output: { key: string; url: string; sizeBytes: number; durationMs: number; renderMs: number } | null;
   error: string | null;
 }
 
-/**
- * The slice of a job the progress poller needs.
- *
- * Written to its own small file so a render can report progress without
- * re-serialising the whole manifest, and so the client can poll without
- * pulling the entire shot list down every 700ms. On a 23-minute video the
- * manifest is ~150KB and progress is under 200 bytes - roughly a 750x
- * reduction in both disk churn and poll traffic.
- */
-export interface ProgressSnapshot extends JobProgress {
-  updatedAt: number;
-  error: string | null;
-  /** Bumped whenever the full manifest changes, so the client knows to refetch. */
-  revision: number;
-}
+/* ------------------------------------------------------------------ */
+/* keys                                                                */
+/* ------------------------------------------------------------------ */
 
-export function jobDir(id: string): string {
-  return path.join(JOBS_ROOT, id);
-}
-
-export function jobPath(id: string, ...parts: string[]): string {
-  return path.join(jobDir(id), ...parts);
-}
+export const keys = {
+  job: (id: string) => `jobs/${id}/job.json`,
+  progress: (id: string) => `jobs/${id}/progress.json`,
+  subtitles: (id: string) => `jobs/${id}/subtitles.srt`,
+  voiceover: (id: string, ext: string) => `jobs/${id}/voiceover${ext}`,
+  audio: (id: string) => `jobs/${id}/voice.m4a`,
+  clip: (id: string, clipId: string, ext: string) => `jobs/${id}/clips/${clipId}${ext}`,
+  thumb: (id: string, clipId: string) => `jobs/${id}/thumbs/${clipId}.jpg`,
+  segment: (id: string, index: number) => `jobs/${id}/segments/seg_${String(index).padStart(5, '0')}.mp4`,
+  part: (id: string, index: number) => `jobs/${id}/parts/part_${String(index).padStart(4, '0')}.mp4`,
+  output: (id: string) => `jobs/${id}/output.mp4`,
+  prefix: (id: string) => `jobs/${id}/`,
+};
 
 /** Reject anything that is not one of our own generated ids. */
 export function isValidJobId(id: string): boolean {
   return /^[0-9a-f-]{36}$/i.test(id);
 }
 
+/* ------------------------------------------------------------------ */
+
+export function defaultProfile(): RenderProfile {
+  return {
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    quality: 23,
+    encoder: 'auto',
+    audioBitrate: '192k',
+    fill: 'pad',
+  };
+}
+
 export async function createJob(): Promise<Job> {
-  const id = randomUUID();
   const now = Date.now();
-
-  await fs.mkdir(jobPath(id, 'clips'), { recursive: true });
-  await fs.mkdir(jobPath(id, 'segments'), { recursive: true });
-  await fs.mkdir(jobPath(id, 'thumbs'), { recursive: true });
-
   const job: Job = {
-    id,
+    id: randomUUID(),
     createdAt: now,
     updatedAt: now,
     progress: { stage: 'created', percent: 0, label: 'Waiting for files' },
@@ -138,133 +168,116 @@ export async function createJob(): Promise<Job> {
     mentions: [],
     shots: [],
     declaredNames: [],
-    profile: {
-      width: 1920,
-      height: 1080,
-      fps: 30,
-      quality: 21,
-      encoder: 'auto',
-      audioBitrate: '192k',
-      fill: 'pad',
-    },
+    profile: defaultProfile(),
+    render: null,
     notes: [],
     warnings: [],
     logs: [],
     output: null,
     error: null,
   };
-
   await writeJob(job);
   return job;
 }
 
 export async function readJob(id: string): Promise<Job | null> {
   if (!isValidJobId(id)) return null;
-  try {
-    const raw = await fs.readFile(jobPath(id, 'job.json'), 'utf8');
-    return JSON.parse(raw) as Job;
-  } catch {
-    return null;
-  }
+  return storage().getJson<Job>(keys.job(id));
 }
 
-/**
- * Persist the manifest atomically.
- *
- * The progress poller reads `job.json` while the renderer writes it. Writing to
- * a temp file and renaming means a reader either sees the whole previous
- * manifest or the whole new one, never a half-written file - the rename is
- * atomic on both NTFS and POSIX filesystems.
- */
 export async function writeJob(job: Job): Promise<void> {
   job.updatedAt = Date.now();
-  const target = jobPath(job.id, 'job.json');
-  const temp = `${target}.${process.pid}.tmp`;
-  await fs.writeFile(temp, JSON.stringify(job, null, 2), 'utf8');
-  await fs.rename(temp, target);
+  await storage().putJson(keys.job(job.id), job);
 }
 
-/** Read-modify-write helper so callers never race on a stale copy. */
-export async function updateJob(id: string, mutate: (job: Job) => void | Promise<void>): Promise<Job> {
-  const job = await readJob(id);
-  if (!job) throw new Error(`Job ${id} not found.`);
-  await mutate(job);
-  await writeJob(job);
-  return job;
-}
-
-/**
- * Write the progress sidecar.
- *
- * Not atomic, unlike the manifest: the file is a couple of hundred bytes, so a
- * torn read is vanishingly unlikely, and a reader that does hit one simply
- * falls back to the manifest rather than showing anything wrong.
- */
-export async function writeProgress(job: Job, revision: number): Promise<void> {
+export async function writeProgress(job: Job, more: boolean): Promise<void> {
   const snapshot: ProgressSnapshot = {
     ...job.progress,
     updatedAt: Date.now(),
     error: job.error,
-    revision,
+    more,
   };
-  await fs.writeFile(jobPath(job.id, 'progress.json'), JSON.stringify(snapshot), 'utf8');
+  await storage().putJson(keys.progress(job.id), snapshot);
 }
 
 export async function readProgress(id: string): Promise<ProgressSnapshot | null> {
   if (!isValidJobId(id)) return null;
-  try {
-    return JSON.parse(await fs.readFile(jobPath(id, 'progress.json'), 'utf8')) as ProgressSnapshot;
-  } catch {
-    return null;
-  }
+  return storage().getJson<ProgressSnapshot>(keys.progress(id));
 }
 
 export function addLog(job: Job, level: LogEntry['level'], message: string): void {
   job.logs.push({ at: Date.now(), level, message });
-  // Keep the manifest small: a long render can emit thousands of lines and the
-  // whole file is re-serialised on every write.
-  if (job.logs.length > 400) job.logs.splice(0, job.logs.length - 400);
+  // Keep the manifest small - it is rewritten whole on every change.
+  if (job.logs.length > 200) job.logs.splice(0, job.logs.length - 200);
 }
 
 export async function deleteJob(id: string): Promise<void> {
   if (!isValidJobId(id)) return;
-  await fs.rm(jobDir(id), { recursive: true, force: true });
+  await storage().removePrefix(keys.prefix(id));
 }
 
-export async function listJobs(): Promise<Job[]> {
-  try {
-    const ids = await fs.readdir(JOBS_ROOT);
-    const jobs = await Promise.all(ids.map((id) => readJob(id)));
-    return jobs
-      .filter((j): j is Job => j !== null)
-      .sort((a, b) => b.createdAt - a.createdAt);
-  } catch {
-    return [];
-  }
+/** Job ids present in storage, newest first. */
+export async function listJobs(limit = 20): Promise<Job[]> {
+  const objects = await storage().list('jobs/').catch(() => []);
+  const ids = objects
+    .filter((o) => o.key.endsWith('/job.json'))
+    .map((o) => o.key.split('/')[1])
+    .filter((id) => isValidJobId(id));
+
+  const jobs = await Promise.all([...new Set(ids)].slice(0, 200).map((id) => readJob(id)));
+  return jobs
+    .filter((j): j is Job => j !== null)
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, limit);
 }
 
 /**
- * Remove jobs older than `maxAgeHours`.
+ * Delete jobs older than `maxAgeHours`.
  *
- * Rendered video and its intermediates are large; without this the .data
- * directory grows without bound. Called opportunistically on job creation
- * rather than on a timer, so there is no background process to manage.
+ * Rendered video and its intermediates are large, and on Blob they are billed,
+ * so this runs opportunistically when a new job starts rather than needing a
+ * scheduler.
  */
 export async function pruneOldJobs(maxAgeHours = 24): Promise<number> {
   const cutoff = Date.now() - maxAgeHours * 3_600_000;
-  const jobs = await listJobs();
+  const jobs = await listJobs(200);
   let removed = 0;
   for (const job of jobs) {
     if (job.createdAt < cutoff) {
-      await deleteJob(job.id);
+      await deleteJob(job.id).catch(() => {});
       removed++;
     }
   }
   return removed;
 }
 
-/** Delete the per-shot intermediates once the final file exists. */
-export async function cleanupIntermediates(id: string): Promise<void> {
-  await fs.rm(jobPath(id, 'segments'), { recursive: true, force: true }).catch(() => {});
-  await fs.mkdir(jobPath(id, 'segments'), { recursive: true }).catch(() => {});
+/**
+ * Confirm storage is usable before anything tries to write to it.
+ *
+ * On Vercel this catches the case that actually matters: the app deployed but
+ * no Blob store was attached, so `BLOB_READ_WRITE_TOKEN` is unset, the adapter
+ * fell back to the filesystem, and that filesystem is read-only. Checking up
+ * front turns a confusing 500 into a sentence naming the missing piece.
+ */
+export async function checkStorage(): Promise<{ writable: boolean; kind: string; error?: string }> {
+  const store = storage();
+  const probe = `health/${randomUUID()}.json`;
+
+  try {
+    await store.putJson(probe, { ok: true });
+    await store.remove(probe);
+    return { writable: true, kind: store.kind };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    const readOnly = code === 'EROFS' || code === 'EACCES' || code === 'EPERM';
+
+    const error =
+      store.kind === 'local' && process.env.VERCEL
+        ? 'No Blob store is attached. On Vercel the filesystem is read-only, so ClipForge needs Vercel Blob for uploads and rendered video: create a Blob store in the project Storage tab and redeploy so BLOB_READ_WRITE_TOKEN is set.'
+        : readOnly
+          ? 'The storage directory is read-only. Set CLIPFORGE_DATA to a writable path.'
+          : (err as Error).message;
+
+    return { writable: false, kind: store.kind, error };
+  }
 }

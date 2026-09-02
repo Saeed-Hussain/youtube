@@ -1,5 +1,6 @@
 import os from 'node:os';
 import { detectBestEncoder, ffmpegPath, renderConcurrency, run } from '@/lib/ffmpeg';
+import { checkStorage } from '@/lib/jobs';
 import { ok } from '@/lib/http';
 
 export const runtime = 'nodejs';
@@ -13,6 +14,10 @@ export const dynamic = 'force-dynamic';
  * whether hardware encoding was found.
  */
 export async function GET() {
+  // Storage is checked independently of FFmpeg: a host can fail either, and the
+  // user needs to know which.
+  const storage = await checkStorage();
+
   try {
     const bin = await ffmpegPath();
     const { stderr, stdout } = await run(bin, ['-version']).catch((e) => ({
@@ -23,7 +28,10 @@ export async function GET() {
     const encoder = await detectBestEncoder();
 
     return ok({
-      ready: true,
+      ready: storage.writable,
+      storageWritable: storage.writable,
+      storageError: storage.error,
+      storageKind: storage.kind,
       ffmpeg: version.trim(),
       encoder,
       hardwareAccelerated: encoder !== 'x264',
@@ -33,6 +41,9 @@ export async function GET() {
   } catch (err) {
     return ok({
       ready: false,
+      storageWritable: storage.writable,
+      storageError: storage.error,
+      storageKind: storage.kind,
       error: err instanceof Error ? err.message : String(err),
       cores: os.cpus()?.length ?? 0,
     });

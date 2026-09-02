@@ -1,5 +1,4 @@
 import { deleteJob } from '@/lib/jobs';
-import { isRendering } from '@/lib/pipeline';
 import { ok, requireJob } from '@/lib/http';
 
 export const runtime = 'nodejs';
@@ -20,15 +19,12 @@ export async function GET(_request: Request, { params }: Params) {
   const found = await requireJob(id);
   if ('response' in found) return found.response;
 
-  return ok({ job: found.job, rendering: isRendering(id) });
+  return ok({ job: found.job, rendering: found.job.progress.stage === 'rendering' });
 }
 
 /** DELETE /api/jobs/:id - remove the job and everything it uploaded. */
 export async function DELETE(_request: Request, { params }: Params) {
   const { id } = await params;
-  if (isRendering(id)) {
-    return ok({ deleted: false, reason: 'Still rendering - wait for it to finish.' });
-  }
   await deleteJob(id);
   return ok({ deleted: true });
 }

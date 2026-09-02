@@ -13,23 +13,25 @@
     "e2e": "node tests/e2e/run.mjs"
   },
   "dependencies": {
+    "@vercel/blob": "^2.8.0",
+    "clsx": "^2.1.1",
+    "double-metaphone": "^2.0.1",
+    "ffmpeg-static": "^5.3.0",
+    "nanoid": "^5.1.5",
     "next": "^15.5.0",
+    "p-limit": "^6.2.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "double-metaphone": "^2.0.1",
-    "p-limit": "^6.2.0",
-    "nanoid": "^5.1.5",
-    "zod": "^3.25.76",
-    "clsx": "^2.1.1"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
-    "typescript": "^5.8.3",
-    "tailwindcss": "^3.4.17",
+    "autoprefixer": "^10.4.21",
     "postcss": "^8.5.3",
-    "autoprefixer": "^10.4.21"
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.8.3"
   },
   "engines": {
     "node": ">=20.11"

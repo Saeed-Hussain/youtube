@@ -3,8 +3,7 @@
 Upload a subtitle file, your clips and a voiceover. Get back a finished video where
 each character is on screen at the exact moment their name is spoken.
 
-**Your clip filenames are the cast.** No database, no cloud services, no
-browser-side video encoding.
+**Your clip filenames are the cast.** No database. Deploys to Vercel.
 
 ---
 
@@ -15,8 +14,9 @@ npm install
 npm run dev          # http://localhost:3000
 ```
 
-FFmpeg must be installed and on your `PATH` (`ffmpeg -version` should work).
-Set `FFMPEG_PATH` / `FFPROBE_PATH` to point at specific binaries instead.
+FFmpeg is bundled, so nothing needs installing. If you have your own build on
+`PATH` it is preferred locally, since it usually has hardware encoders the
+bundled binary lacks; `FFMPEG_PATH` pins a specific one.
 
 The badge in the header tells you whether FFmpeg was found and whether hardware
 encoding is available, before you upload anything.
@@ -224,6 +224,94 @@ video vs audio   : 28.0ms  PASS (under one frame)
 
 ---
 
+## Deploying to Vercel
+
+```bash
+vercel deploy
+```
+
+Then **create a Blob store** in the project's Storage tab and redeploy. That is
+the one manual step, and without it the app will tell you so on load rather than
+failing later.
+
+### What had to change to make this work
+
+Vercel imposes four hard constraints, and each one needed an architectural
+answer rather than a setting:
+
+| Constraint | How it is handled |
+|---|---|
+| **No FFmpeg on the host** | `ffmpeg-static` is bundled into the function (~79MB of a 250MB budget) and, since files unpacked into a serverless bundle have no executable bit, copied to `/tmp` and chmodded on first use. `ffprobe` is *not* shipped — it would add 171MB — so media is probed by parsing `ffmpeg -i` instead. |
+| **Read-only filesystem** | Nothing writes to disk. All state goes through a storage adapter: the local filesystem in development, Vercel Blob in production. `/tmp` is used only as scratch space inside a single invocation. |
+| **4.5MB request body cap** | Clips never touch a function. The browser requests a scoped, single-use token from `/api/blob-upload` and streams the file straight to Blob, then tells the server about it via `/api/jobs/:id/register`. |
+| **60s execution limit** | The render is a resumable state machine the client drives one step at a time. |
+
+### How the chunked render works
+
+A twenty-minute video takes far longer to encode than any function may run, and
+work started with `void` is killed the moment the response is sent. So the
+render is split into steps that each fit inside one invocation:
+
+```
+POST /render          set up: normalise audio, pick encoder, compute frame budget
+POST /render/step  ×N  encode shots  ->  fold into parts  ->  concatenate
+```
+
+Each step works until a time budget expires, records exactly where it stopped in
+the manifest, and returns `{ more: true }`. The next call — almost certainly on a
+different instance with a different `/tmp` — reads that state and continues. A
+dropped call costs one retry, not the render.
+
+The middle stage exists purely to bound `/tmp`: pulling several hundred finished
+segments down at once would exceed the 512MB scratch space, so segments are
+folded into part files in groups of 40, and only the handful of parts is needed
+at the end.
+
+### Limits you should know about
+
+These are honest constraints of the platform, not bugs:
+
+- **Hobby caps functions at 60s.** More steps, same result, but a long video
+  means a lot of round trips. On Pro, raise `maxDuration` in `vercel.json` to
+  300 and `CLIPFORGE_STEP_BUDGET_MS` to ~280000 for far fewer, longer steps.
+- **The browser tab must stay open** during a render, because the client drives
+  the loop. Closing it pauses the render; reopening the job resumes it, since
+  all progress is in the manifest.
+- **No hardware encoding.** The bundled FFmpeg is CPU-only, so renders are
+  slower than on a machine with NVENC or QSV.
+- **Blob storage is billed** by volume and bandwidth. Jobs older than 24 hours
+  are pruned when a new one starts.
+- **Cold starts pay ~80MB** of `/tmp` writes to stage the FFmpeg binary, once
+  per instance.
+
+If any of that is unwelcome, the same codebase runs unchanged on a normal server
+— set `CLIPFORGE_DATA` to a writable path, install FFmpeg, and it uses the
+filesystem and the system binary automatically.
+
+### Local development
+
+Nothing above applies locally. With no `BLOB_READ_WRITE_TOKEN` set, the app uses
+the filesystem and your own FFmpeg, and uploads go through the server:
+
+```bash
+npm run dev
+```
+
+### Checking a deployment
+
+`GET /api/system` reports every requirement before you upload anything, and the
+UI shows the same as a banner:
+
+```json
+{ "ready": true, "storageWritable": true, "storageKind": "blob",
+  "ffmpeg": "ffmpeg version 6.0", "encoder": "x264", "concurrency": 3 }
+```
+
+`storageKind: "local"` on a Vercel deployment means no Blob store is attached —
+that is the one failure worth watching for.
+
+---
+
 ## Layout
 
 ```
@@ -233,35 +321,40 @@ src/lib/
   fuzzy.ts      edit distance + phonetic matching
   segment.ts    mentions -> cut points
   plan.ts       cut points -> shot list (which clip, which seconds)
-  ffmpeg.ts     native FFmpeg: probe, encode, concat, frame maths
-  pipeline.ts   orchestration
-  jobs.ts       filesystem job store
+  ffmpeg.ts     FFmpeg: binary resolution, probing, encoding, frame maths
+  render.ts     the chunked, resumable render state machine
+  storage.ts    one interface over the filesystem and Vercel Blob
+  ingest.ts     validating and attaching an uploaded file
+  pipeline.ts   analysis orchestration
+  jobs.ts       job manifests
 
-src/app/api/    jobs, upload, analyse, render, download, thumb, system
+src/app/api/
+  blob-upload           issues scoped tokens for direct browser uploads
+  jobs/[id]/register    attaches a directly-uploaded file
+  jobs/[id]/render      starts a render
+  jobs/[id]/render/step advances it by one invocation
+  jobs/[id]/progress    ~200 byte poll payload
+  files/[...key]        serves local objects in development only
+
 src/components/ Timeline  ShotInspector  CastPanel  ClipLibrary  DropZone
 tests/          unit tests + e2e harness
 legacy/         the previous single-file build, kept for reference
 ```
 
-Jobs live in `.data/jobs/<uuid>/` — uploads, intermediates, `job.json` and the
-finished MP4. Delete the directory to delete the job. Jobs older than 24 hours are
-pruned when a new one starts.
+A job is a manifest plus its media, under the `jobs/<uuid>/` prefix — in `.data`
+locally, in Blob on Vercel. Jobs older than 24 hours are pruned when a new one
+starts.
 
 ---
 
 ## Notes and limits
 
-- **One machine, one process.** Renders run in the Next.js server process and are
-  tracked in memory, so this is built for a box you control, not a serverless
-  platform where the process can vanish mid-render.
 - **A character with no clip is not in the edit.** That is the point of rule 1 —
-  but it means if you want someone on screen you need footage for them, or a
-  name in *Extra names* plus a tagged clip.
+  if you want someone on screen you need footage for them, or a name in *Extra
+  names* plus a tagged clip.
 - **Timing still comes from the SRT.** Cue *structure* is ignored, but the
   word-level timings the cues imply are the only clock available. If your
   subtitles are misaligned with your voiceover, the cuts inherit that.
-- **Uploads stream to disk** rather than buffering, so clip size is bounded by
-  disk, not memory.
-- **FFmpeg is not vendored.** There is no `ffmpeg-static` fallback: this needs a
-  full build with the codecs and hardware encoders your machine has, so it uses
-  the one on your `PATH` or the one `FFMPEG_PATH` points at.
+- **`ffmpeg-static` downloads its binary in a postinstall script.** If a build
+  environment disables install scripts, the binary will be missing and
+  `/api/system` will say so.

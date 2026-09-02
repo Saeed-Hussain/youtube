@@ -3,6 +3,7 @@ import { once } from 'node:events';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import { isServerless } from './storage.ts';
 
 export interface MediaInfo {
   durationMs: number;
@@ -32,104 +33,169 @@ export class FFmpegError extends Error {
 /* ------------------------------------------------------------------ */
 
 let cachedFfmpeg: string | null = null;
-let cachedFfprobe: string | null = null;
 
 /**
- * Locate the ffmpeg binary.
+ * Locate a runnable ffmpeg.
  *
- * A native binary is the entire reason this rewrite renders in seconds rather
- * than minutes: ffmpeg.wasm runs the same encoder inside WebAssembly with no
- * SIMD-tuned assembly and no multi-process parallelism, which costs roughly an
- * order of magnitude. FFMPEG_PATH lets a deployment pin a specific build;
- * otherwise we take whatever is on PATH.
+ * Three sources, in order of preference:
+ *
+ *   1. `FFMPEG_PATH`, so a deployment can pin a specific build.
+ *   2. Whatever is on `PATH` - the fast path locally, and usually a fuller
+ *      build with hardware encoders the bundled binary does not have.
+ *   3. The `ffmpeg-static` binary, which is what makes this work on Vercel,
+ *      where nothing is installed on the host.
+ *
+ * The third case needs care. Files unpacked into a serverless bundle arrive
+ * without the executable bit, so the binary is copied into `/tmp` and chmodded
+ * on first use. That costs ~80MB of writes on a cold start and nothing
+ * afterwards, since `/tmp` persists for the life of the instance.
  */
 export async function ffmpegPath(): Promise<string> {
   if (cachedFfmpeg) return cachedFfmpeg;
-  cachedFfmpeg = await resolveBinary('ffmpeg', process.env.FFMPEG_PATH);
-  return cachedFfmpeg;
-}
 
-export async function ffprobePath(): Promise<string> {
-  if (cachedFfprobe) return cachedFfprobe;
-  cachedFfprobe = await resolveBinary('ffprobe', process.env.FFPROBE_PATH);
-  return cachedFfprobe;
-}
+  if (process.env.FFMPEG_PATH && (await isRunnable(process.env.FFMPEG_PATH))) {
+    cachedFfmpeg = process.env.FFMPEG_PATH;
+    return cachedFfmpeg;
+  }
 
-async function resolveBinary(name: string, override?: string): Promise<string> {
-  // An override first, then whatever is on PATH. There is deliberately no
-  // bundled-binary fallback: importing an optional package that is not in
-  // package.json makes the bundler emit an unresolvable module and fail the
-  // production build, and a 70MB vendored binary is the wrong default for a
-  // tool that needs a full FFmpeg build anyway.
-  const candidates = [override, name].filter(Boolean) as string[];
+  if (!isServerless() && (await isRunnable('ffmpeg'))) {
+    cachedFfmpeg = 'ffmpeg';
+    return cachedFfmpeg;
+  }
 
-  for (const candidate of candidates) {
-    try {
-      const proc = spawn(candidate, ['-version'], { stdio: 'ignore' });
-      const [code] = (await once(proc, 'close')) as [number];
-      if (code === 0) return candidate;
-    } catch {
-      /* try the next one */
-    }
+  const bundled = await bundledFfmpeg();
+  if (bundled) {
+    cachedFfmpeg = bundled;
+    return cachedFfmpeg;
+  }
+
+  if (await isRunnable('ffmpeg')) {
+    cachedFfmpeg = 'ffmpeg';
+    return cachedFfmpeg;
   }
 
   throw new Error(
-    `Could not find "${name}". Install FFmpeg and make sure it is on your PATH, or set ${name.toUpperCase()}_PATH to its full path.`,
+    'Could not find a runnable ffmpeg. Install FFmpeg and put it on PATH, or set FFMPEG_PATH.',
   );
+}
+
+/** ffprobe is deliberately not used - see `probe`. */
+export async function ffprobePath(): Promise<string> {
+  return ffmpegPath();
+}
+
+async function bundledFfmpeg(): Promise<string | null> {
+  let source: string | null = null;
+  try {
+    const mod = await import('ffmpeg-static');
+    source = (mod.default ?? (mod as unknown as string)) as string;
+  } catch {
+    return null;
+  }
+  if (!source) return null;
+
+  if (await isRunnable(source)) return source;
+
+  // Unpacked without the executable bit: stage a runnable copy in /tmp.
+  try {
+    const target = path.join(os.tmpdir(), 'clipforge-bin', 'ffmpeg');
+    if (!(await isRunnable(target))) {
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.copyFile(source, target);
+      await fs.chmod(target, 0o755);
+    }
+    return (await isRunnable(target)) ? target : null;
+  } catch {
+    return null;
+  }
+}
+
+async function isRunnable(bin: string): Promise<boolean> {
+  try {
+    const proc = spawn(bin, ['-version'], { stdio: 'ignore' });
+    const [code] = (await once(proc, 'close')) as [number | null];
+    return code === 0;
+  } catch {
+    return false;
+  }
 }
 
 /* ------------------------------------------------------------------ */
 /* probing                                                             */
 /* ------------------------------------------------------------------ */
 
-/** Read duration, resolution and frame rate out of a media file. */
+/**
+ * Read duration, resolution and frame rate out of a media file.
+ *
+ * Parsed from `ffmpeg -i` rather than by calling ffprobe. That is not the
+ * obvious choice, but ffprobe-static ships a binary for every platform at once
+ * - 171MB - which alone would blow Vercel's 250MB function limit. ffmpeg
+ * already prints everything needed to stderr, so shipping the second binary
+ * buys nothing.
+ *
+ * The one thing this loses is duration precision: the header line is only
+ * accurate to a centisecond. That is irrelevant for a clip, where duration only
+ * decides whether to trim or loop, and for the voiceover - which sets the
+ * length of the whole video - `exactDuration` decodes for a millisecond answer.
+ */
 export async function probe(file: string): Promise<MediaInfo> {
-  const bin = await ffprobePath();
-  const { stdout } = await run(bin, [
-    '-v', 'error',
-    '-print_format', 'json',
-    '-show_format',
-    '-show_streams',
-    file,
-  ]);
+  const bin = await ffmpegPath();
 
-  let parsed: any;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    throw new Error(`ffprobe returned unreadable output for ${path.basename(file)}.`);
+  // `-i` with no output is an error by design; ffmpeg prints the stream table
+  // and exits non-zero, so the failure is expected and the text is the payload.
+  const text = await run(bin, ['-hide_banner', '-i', file])
+    .then((r) => r.stderr)
+    .catch((e) => (e instanceof FFmpegError ? e.stderr : ''));
+
+  if (!text || !/Input #0/.test(text)) {
+    throw new Error(`FFmpeg could not read ${path.basename(file)} - is it a valid media file?`);
   }
 
-  const streams: any[] = parsed.streams ?? [];
-  const video = streams.find((s) => s.codec_type === 'video');
-  const audio = streams.find((s) => s.codec_type === 'audio');
+  const duration = text.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/);
+  const durationMs = duration
+    ? (Number(duration[1]) * 3600 + Number(duration[2]) * 60 + Number(duration[3])) * 1000 +
+      Number(duration[4].padEnd(3, '0').slice(0, 3))
+    : 0;
 
-  // Prefer the container duration; fall back to the stream's, since some
-  // fragmented MP4s and raw streams only carry it in one place.
-  const durationSec =
-    Number(parsed.format?.duration) ||
-    Number(video?.duration) ||
-    Number(audio?.duration) ||
-    0;
+  const video = text.match(/Stream #\d+:\d+.*?: Video: ([^\s,]+).*/);
+  const audio = text.match(/Stream #\d+:\d+.*?: Audio: ([^\s,]+)/);
+
+  // Resolution is the first WxH on the video line; the SAR/DAR pairs that
+  // follow use ':' so they cannot be confused with it.
+  const size = video?.[0].match(/[,\s](\d{2,5})x(\d{2,5})[\s,]/);
+  const fps = video?.[0].match(/([\d.]+)\s*fps/);
 
   return {
-    durationMs: Math.round(durationSec * 1000),
-    width: Number(video?.width) || 0,
-    height: Number(video?.height) || 0,
-    fps: parseRational(video?.avg_frame_rate) || parseRational(video?.r_frame_rate) || 0,
+    durationMs,
+    width: size ? Number(size[1]) : 0,
+    height: size ? Number(size[2]) : 0,
+    fps: fps ? Number(fps[1]) : 0,
     hasVideo: Boolean(video),
     hasAudio: Boolean(audio),
-    videoCodec: video?.codec_name ?? null,
-    audioCodec: audio?.codec_name ?? null,
+    videoCodec: video?.[1] ?? null,
+    audioCodec: audio?.[1] ?? null,
   };
 }
 
-function parseRational(value: unknown): number {
-  if (typeof value !== 'string') return 0;
-  const [num, den] = value.split('/').map(Number);
-  if (!den) return Number.isFinite(num) ? num : 0;
-  const fps = num / den;
-  return Number.isFinite(fps) && fps > 0 ? fps : 0;
+/**
+ * Decode a file to nowhere and report exactly how long it turned out to be.
+ *
+ * Used for the voiceover, whose length defines the length of the finished
+ * video: a centisecond of error in the header would put the last shot a frame
+ * out. Costs one full decode pass, which for audio is fast.
+ */
+export async function exactDuration(file: string): Promise<number> {
+  const bin = await ffmpegPath();
+  const { stderr } = await run(bin, ['-hide_banner', '-nostdin', '-i', file, '-f', 'null', '-']);
+
+  let best = 0;
+  for (const m of stderr.matchAll(/time=\s*(\d+):(\d+):(\d+)\.(\d+)/g)) {
+    const ms =
+      (Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3])) * 1000 +
+      Number(m[4].padEnd(3, '0').slice(0, 3));
+    if (ms > best) best = ms;
+  }
+  return best;
 }
 
 /** Grab a still from the middle of a clip, for the clip list in the UI. */
@@ -496,8 +562,7 @@ export async function prepareAudio(source: string, dest: string, profile: Render
     '-ac', '2',
     dest,
   ]);
-  const info = await probe(dest);
-  return info.durationMs;
+  return exactDuration(dest);
 }
 
 /** Sensible parallelism: leave a core for the OS and the Next.js process. */

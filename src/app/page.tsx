@@ -48,7 +48,10 @@ export default function Page() {
   const [fill, setFill] = useState<'pad' | 'crop'>('pad');
 
   const jobId = job?.id ?? null;
-  const rendering = job?.progress.stage === 'rendering';
+  const rendering = job?.progress.stage === 'rendering' || job?.progress.stage === 'assembling';
+  // Blob storage means the browser uploads straight to it, bypassing the
+  // serverless request-body limit.
+  const directUpload = system?.storageKind === 'blob';
 
   /* --- bootstrap ----------------------------------------------------- */
   useEffect(() => {
@@ -62,37 +65,63 @@ export default function Page() {
       .catch((e) => setError(e.message));
   }, []);
 
-  /* --- progress polling ----------------------------------------------- */
-  // Polls the tiny progress sidecar, not the whole manifest: pulling the full
-  // shot list several times a second would ship ~150KB per poll on a long
-  // video and re-render every panel on the page for the sake of two numbers.
-  // The full job is refetched exactly once, when the render stops.
+  /* --- driving the render ---------------------------------------------- */
+  // The render is a chain of short server calls rather than one long one: a
+  // serverless function is killed at a hard time limit, so each step encodes
+  // what it can, records where it stopped, and returns. This loop keeps calling
+  // until the server says there is nothing left. Because every step is
+  // resumable from the manifest, a dropped call costs one retry, not the render.
   useEffect(() => {
     if (!jobId || !rendering) return;
 
     let cancelled = false;
-    const timer = setInterval(async () => {
-      try {
-        const { progress } = await api.progress(jobId);
-        if (cancelled) return;
 
-        if (progress.stage === 'rendering') {
-          setJob((current) => (current ? { ...current, progress } : current));
-          return;
+    const drive = async () => {
+      while (!cancelled) {
+        try {
+          const { result } = await api.renderStep(jobId);
+          if (cancelled) return;
+
+          setJob((current) =>
+            current
+              ? {
+                  ...current,
+                  progress: {
+                    ...current.progress,
+                    stage: result.stage,
+                    percent: result.percent,
+                    label:
+                      result.stage === 'assembling'
+                        ? `Assembling ${result.shotsDone}/${result.shotsTotal}`
+                        : `Rendering shot ${result.shotsDone}/${result.shotsTotal}`,
+                    shotsDone: result.shotsDone,
+                    shotsTotal: result.shotsTotal,
+                  },
+                }
+              : current,
+          );
+
+          if (!result.more) break;
+        } catch {
+          // A step can fail transiently - a cold start, a slow download. Pause
+          // briefly and try again rather than abandoning the render.
+          await new Promise((r) => setTimeout(r, 2000));
         }
+      }
 
-        // Terminal state: now the manifest is worth pulling, for the output
-        // details and the log lines the render appended.
+      if (cancelled) return;
+      // Finished or failed: pull the manifest for the output and the log.
+      try {
         const { job: fresh } = await api.getJob(jobId);
         if (!cancelled) setJob(fresh);
       } catch {
-        /* a dropped poll is harmless - the next one catches up */
+        /* the next user action will refresh it */
       }
-    }, 600);
+    };
 
+    void drive();
     return () => {
       cancelled = true;
-      clearInterval(timer);
     };
   }, [jobId, rendering]);
 
@@ -131,7 +160,7 @@ export default function Page() {
       for (const file of files) {
         setUploads((u) => [...u, { name: file.name, fraction: 0 }]);
         try {
-          const updated = await uploadFile(jobId, kind, file, (fraction) =>
+          const updated = await uploadFile(jobId, kind, file, directUpload, (fraction) =>
             setUploads((u) => u.map((x) => (x.name === file.name ? { ...x, fraction } : x))),
           );
           setJob(updated);
@@ -142,7 +171,7 @@ export default function Page() {
         }
       }
     },
-    [jobId],
+    [jobId, directUpload],
   );
 
   const analyse = useCallback(() => {
@@ -205,7 +234,10 @@ export default function Page() {
           {error}
         </Banner>
       )}
-      {system && !system.ready && (
+      {system?.storageWritable === false && (
+        <Banner tone="bad">{system.storageError}</Banner>
+      )}
+      {system && !system.ready && system.storageWritable !== false && (
         <Banner tone="warn">FFmpeg was not found, so rendering will fail. {system.error}</Banner>
       )}
 

@@ -17,7 +17,7 @@ function clip(id: string, filename: string, durationMs: number): ClipAsset {
   return {
     id,
     filename,
-    path: `/tmp/${filename}`,
+    key: `clips/${filename}`,
     durationMs,
     width: 1920,
     height: 1080,

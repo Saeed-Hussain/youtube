@@ -1,11 +1,11 @@
 import { z } from 'zod';
-import { isRendering, renderJob } from '@/lib/pipeline';
-import { addLog, writeJob } from '@/lib/jobs';
+import { startRender } from '@/lib/render';
+import { addLog, writeJob, writeProgress } from '@/lib/jobs';
 import { fail, ok, requireJob } from '@/lib/http';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
-export const maxDuration = 3600;
+export const maxDuration = 60;
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -20,12 +20,12 @@ const Profile = z.object({
 });
 
 /**
- * POST /api/jobs/:id/render
+ * POST /api/jobs/:id/render - begin a render.
  *
- * Kicks the render off and returns immediately. The render outlives the
- * request on purpose: a 20-minute video takes longer than any sensible HTTP
- * timeout, and progress is already durable in `job.json`, so the client polls
- * for it instead of holding a connection open.
+ * Only sets up state: normalises the voiceover, picks the encoder and works out
+ * the frame budget. The encoding itself happens in `/render/step`, which the
+ * client calls repeatedly, because no single serverless invocation lives long
+ * enough to render a video.
  */
 export async function POST(request: Request, { params }: Params) {
   const { id } = await params;
@@ -33,7 +33,6 @@ export async function POST(request: Request, { params }: Params) {
   if ('response' in found) return found.response;
   const job = found.job;
 
-  if (isRendering(id)) return fail('This job is already rendering.', 409);
   if (!job.shots.length) return fail('Run the analysis before rendering.');
 
   let profile: z.infer<typeof Profile> = {};
@@ -44,18 +43,20 @@ export async function POST(request: Request, { params }: Params) {
   }
 
   job.profile = { ...job.profile, ...stripUndefined(profile) };
-  job.output = null;
-  job.error = null;
-  job.progress = { stage: 'rendering', percent: 0, label: 'Starting' };
   addLog(job, 'info', `Render queued at ${job.profile.width}x${job.profile.height} ${job.profile.fps}fps.`);
-  await writeJob(job);
 
-  // Deliberately not awaited. Failures are recorded on the job by renderJob's
-  // own error path, so the catch here only exists to keep the rejection from
-  // becoming an unhandled promise.
-  void renderJob(job).catch(() => {});
-
-  return ok({ started: true, job });
+  try {
+    await startRender(job);
+    return ok({ job });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    job.progress = { stage: 'failed', percent: 0, label: 'Render failed' };
+    job.error = message;
+    addLog(job, 'error', message);
+    await writeJob(job);
+    await writeProgress(job, false);
+    return fail(message, 500);
+  }
 }
 
 function stripUndefined<T extends object>(obj: T): Partial<T> {

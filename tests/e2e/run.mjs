@@ -67,19 +67,28 @@ for (const s of analysed.shots) {
   );
 }
 
-// --- 3. render -------------------------------------------------------------
-console.log('\nrendering...');
+// --- 3. render, one step at a time -----------------------------------------
+// This mirrors exactly what the browser does. The render is a chain of short
+// calls rather than one long one, so no single request has to outlive a
+// serverless function's time limit.
+console.log('');
+console.log('rendering...');
 const t0 = Date.now();
 await post(`/api/jobs/${id}/render`, { width: 1920, height: 1080, fps: 30, quality: 21, fill: 'pad' });
 
-let job;
+let steps = 0;
+let failure = null;
 for (;;) {
-  await new Promise((r) => setTimeout(r, 500));
-  ({ job } = await j(await fetch(`${BASE}/api/jobs/${id}`)));
-  if (job.progress.stage === 'done' || job.progress.stage === 'failed') break;
-  process.stdout.write(`\r  ${job.progress.percent}% ${job.progress.label}          `);
+  const { result } = await post(`/api/jobs/${id}/render/step`);
+  steps++;
+  console.log(`  step ${steps}: ${String(result.percent).padStart(3)}% ${result.stage.padEnd(10)} ${result.shotsDone}/${result.shotsTotal}`);
+  if (result.error) { failure = result.error; break; }
+  if (!result.more) break;
 }
-console.log(`\nrender wall clock: ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+
+const { job } = await j(await fetch(`${BASE}/api/jobs/${id}`));
+console.log(`render wall clock: ${((Date.now() - t0) / 1000).toFixed(1)}s across ${steps} step(s)`);
+if (failure) { console.error('FAILED:', failure); process.exit(1); }
 
 if (job.progress.stage === 'failed') {
   console.error('FAILED:', job.error);
@@ -91,7 +100,8 @@ for (const l of job.logs.slice(-12)) console.log(`  [${l.level}] ${l.message}`);
 
 // --- 4. verify -------------------------------------------------------------
 const out = path.join(OUT_DIR, 'out.mp4');
-const res = await fetch(`${BASE}/api/jobs/${id}/download`);
+const outUrl = job.output.url.startsWith('http') ? job.output.url : BASE + job.output.url;
+const res = await fetch(outUrl);
 fs.writeFileSync(out, Buffer.from(await res.arrayBuffer()));
 
 const probe = (args) => execFileSync('ffprobe', args, { encoding: 'utf8' }).trim();

@@ -5,8 +5,8 @@ import type { Ms } from './time.ts';
 export interface ClipAsset {
   id: string;
   filename: string;
-  /** Absolute path on disk. */
-  path: string;
+  /** Storage key. Planning never opens the file; only the renderer does. */
+  key: string;
   durationMs: Ms;
   width: number;
   height: number;

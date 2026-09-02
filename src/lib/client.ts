@@ -1,9 +1,15 @@
 'use client';
 
 import type { Job, ProgressSnapshot } from './jobs';
+import type { StepResult } from './render';
 
 export interface SystemInfo {
   ready: boolean;
+  /** 'blob' means uploads go straight from the browser to storage. */
+  storageKind?: 'local' | 'blob';
+  storageWritable?: boolean;
+  storageError?: string;
+  dataPath?: string;
   ffmpeg?: string;
   encoder?: string;
   hardwareAccelerated?: boolean;
@@ -30,6 +36,17 @@ export const api = {
 
   /** ~200 bytes, safe to poll several times a second during a render. */
   progress: (id: string) => request<{ progress: ProgressSnapshot }>(`/api/jobs/${id}/progress`),
+
+  /** Advance a chunked render by one step. */
+  renderStep: (id: string) =>
+    request<{ result: StepResult }>(`/api/jobs/${id}/render/step`, { method: 'POST' }),
+
+  registerUpload: (id: string, payload: { kind: 'clip' | 'voiceover'; key: string; filename: string; clipId?: string }) =>
+    request<{ job: Job }>(`/api/jobs/${id}/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
 
   analyse: (id: string, settings: Record<string, unknown>) =>
     request<{ job: Job }>(`/api/jobs/${id}/analyse`, {
@@ -66,13 +83,53 @@ export const api = {
 };
 
 /**
- * Upload one file with progress.
+ * Upload a file, by whichever route the deployment supports.
+ *
+ * On a serverless host the browser streams straight to Blob storage, because a
+ * function's request body is capped at about 4.5MB and no video clip fits. The
+ * server is told about the file afterwards. Locally the file goes through the
+ * server, which keeps development a single moving part.
+ */
+export async function uploadFile(
+  jobId: string,
+  kind: 'clip' | 'voiceover' | 'subtitles',
+  file: File,
+  direct: boolean,
+  onProgress?: (fraction: number) => void,
+): Promise<Job> {
+  // Subtitles are kilobytes, so they always take the simple path.
+  if (!direct || kind === 'subtitles') {
+    return uploadThroughServer(jobId, kind, file, onProgress);
+  }
+
+  const { upload } = await import('@vercel/blob/client');
+  const clipId = crypto.randomUUID();
+  const extension = file.name.match(/(\.[a-z0-9]{1,8})$/i)?.[1]?.toLowerCase() ?? (kind === 'voiceover' ? '.mp3' : '.mp4');
+  const key = kind === 'voiceover' ? `jobs/${jobId}/voiceover${extension}` : `jobs/${jobId}/clips/${clipId}${extension}`;
+
+  const blob = await upload(key, file, {
+    access: 'public',
+    handleUploadUrl: '/api/blob-upload',
+    onUploadProgress: ({ percentage }) => onProgress?.(percentage / 100),
+  });
+
+  const { job } = await api.registerUpload(jobId, {
+    kind,
+    key: blob.pathname,
+    filename: file.name,
+    clipId: kind === 'clip' ? clipId : undefined,
+  });
+  return job;
+}
+
+/**
+ * Upload through the server, with progress.
  *
  * XHR rather than fetch because fetch still cannot report upload progress in
- * any browser, and a 300MB clip uploading with no feedback is indistinguishable
+ * any browser, and a large file uploading with no feedback is indistinguishable
  * from a hung page.
  */
-export function uploadFile(
+function uploadThroughServer(
   jobId: string,
   kind: 'clip' | 'voiceover' | 'subtitles',
   file: File,
